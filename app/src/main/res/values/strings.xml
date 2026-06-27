@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ScrollPilot</string>
+    <string name="accessibility_service_label">ScrollPilot</string>
+    <string name="accessibility_service_description">ScrollPilot uses the Accessibility Service to detect which app is in the foreground and perform scroll gestures on your behalf.</string>
+</resources>
