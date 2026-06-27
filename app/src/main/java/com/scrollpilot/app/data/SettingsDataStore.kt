@@ -12,34 +12,41 @@ private val Context.ds: DataStore<Preferences> by preferencesDataStore("scrollpi
 
 object SettingsDataStore {
 
-    private val KEY_APPS          = stringSetPreferencesKey("enabled_apps")
-    private val KEY_OX            = intPreferencesKey("overlay_x")
-    private val KEY_OY            = intPreferencesKey("overlay_y")
-    private val KEY_REMEMBER_POS  = booleanPreferencesKey("remember_position")
-    private val KEY_HIDE_KB       = booleanPreferencesKey("hide_keyboard")
-    private val KEY_OVERLAY_SIZE  = stringPreferencesKey("overlay_size")
-    private val KEY_CUSTOM_SCALE  = floatPreferencesKey("custom_scale")
-    private val KEY_ENGINE        = stringPreferencesKey("scroll_engine")
-    private val KEY_FLING_WAIT    = longPreferencesKey("fling_wait_ms")
-    private val KEY_FLING_THRESH  = floatPreferencesKey("fling_threshold")
-    private val KEY_DEF_SPEED     = floatPreferencesKey("default_speed")
+    private val KEY_APPS         = stringSetPreferencesKey("enabled_apps")
+    private val KEY_OX           = intPreferencesKey("overlay_x")
+    private val KEY_OY           = intPreferencesKey("overlay_y")
+    private val KEY_REMEMBER_POS = booleanPreferencesKey("remember_position")
+    private val KEY_HIDE_KB      = booleanPreferencesKey("hide_keyboard")
+    private val KEY_OVERLAY_SIZE = stringPreferencesKey("overlay_size")
+    private val KEY_CUSTOM_SCALE = floatPreferencesKey("custom_scale")
+    private val KEY_ENGINE       = stringPreferencesKey("scroll_engine")
+    private val KEY_FLING_WAIT   = longPreferencesKey("fling_wait_ms")
+    private val KEY_FLING_THRESH = floatPreferencesKey("fling_threshold")
+    private val KEY_DEF_SPEED    = floatPreferencesKey("default_speed")
 
     fun observe(ctx: Context): Flow<GlobalSettings> =
         ctx.ds.data.catch { emit(emptyPreferences()) }.map { p ->
             GlobalSettings(
-                enabledApps             = p[KEY_APPS] ?: emptySet(),
-                overlayX                = p[KEY_OX]  ?: -1,
-                overlayY                = p[KEY_OY]  ?: -1,
-                rememberLastPosition    = p[KEY_REMEMBER_POS]  ?: true,
-                hideOnKeyboard          = p[KEY_HIDE_KB]       ?: true,
-                overlaySize             = runCatching { OverlaySize.valueOf(p[KEY_OVERLAY_SIZE] ?: "") }.getOrDefault(OverlaySize.COMPACT),
-                customScale             = p[KEY_CUSTOM_SCALE]  ?: 0.75f,
-                scrollEngine            = runCatching { ScrollEngine.valueOf(p[KEY_ENGINE] ?: "") }.getOrDefault(ScrollEngine.HYBRID),
-                flingWaitMs             = p[KEY_FLING_WAIT]    ?: 900L,
-                swipeToFlingThreshold   = p[KEY_FLING_THRESH]  ?: 8000f,
-                defaultSpeed            = p[KEY_DEF_SPEED]     ?: 3000f,
+                enabledApps           = p[KEY_APPS] ?: emptySet(),
+                overlayX              = p[KEY_OX]   ?: -1,
+                overlayY              = p[KEY_OY]   ?: -1,
+                rememberLastPosition  = p[KEY_REMEMBER_POS] ?: true,
+                hideOnKeyboard        = p[KEY_HIDE_KB]      ?: true,
+                overlaySize           = runCatching { OverlaySize.valueOf(p[KEY_OVERLAY_SIZE] ?: "") }.getOrDefault(OverlaySize.COMPACT),
+                customScale           = p[KEY_CUSTOM_SCALE] ?: 0.75f,
+                scrollEngine          = runCatching { ScrollEngine.valueOf(p[KEY_ENGINE] ?: "") }.getOrDefault(ScrollEngine.HYBRID),
+                flingWaitMs           = p[KEY_FLING_WAIT]   ?: 900L,
+                swipeToFlingThreshold = p[KEY_FLING_THRESH] ?: 8000f,
+                defaultSpeed          = p[KEY_DEF_SPEED]    ?: 3000f,
             )
         }
+
+    /** Alias used by AppSelectionScreen / SettingsScreen */
+    fun globalSettings(ctx: Context): Flow<GlobalSettings> = observe(ctx)
+
+    suspend fun setSelectedApps(ctx: Context, apps: Set<String>) = ctx.ds.edit { p ->
+        p[KEY_APPS] = apps
+    }
 
     suspend fun toggleApp(ctx: Context, pkg: String) = ctx.ds.edit { p ->
         val cur = p[KEY_APPS]?.toMutableSet() ?: mutableSetOf()

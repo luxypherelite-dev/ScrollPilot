@@ -26,20 +26,19 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
     private var currentPkg = ""
     private var overlayVisible = false
 
-    // Volume-key emergency combo tracking
     private var volUpHeld   = false
     private var volDownHeld = false
 
     // ── lifecycle ─────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
         super.onServiceConnected()
+        instance = this
         ScrollController.service = this
+
         overlayManager = OverlayManager(this)
 
-        // Request key events so we can intercept volume keys
         serviceInfo = serviceInfo?.also { info ->
-            info.flags = info.flags or
-                    AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+            info.flags = info.flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
         }
 
         createNotificationChannel()
@@ -59,7 +58,7 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         when (event.eventType) {
-            // User touched the screen → immediately stop scrolling
+            // User touched the screen → stop scrolling immediately
             AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
             AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
@@ -67,27 +66,24 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
                     ScrollController.pause()
                 }
             }
-
-            // App changed → update overlay visibility
+            // App switched
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val pkg = event.packageName?.toString() ?: return
                 if (pkg != currentPkg) {
                     currentPkg = pkg
-                    // Also stop scrolling when switching apps
                     ScrollController.stop()
                     updateOverlayVisibility()
                 }
             }
-
-            // Input method (keyboard) appeared/disappeared
+            // Keyboard open/close
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
                 if (currentSettings.hideOnKeyboard) {
-                    val keyboardOpen = isKeyboardVisible()
-                    if (keyboardOpen && overlayVisible) {
+                    val kbOpen = isKeyboardVisible()
+                    if (kbOpen && overlayVisible) {
                         ScrollController.stop()
                         overlayManager?.hide()
                         overlayVisible = false
-                    } else if (!keyboardOpen) {
+                    } else if (!kbOpen) {
                         updateOverlayVisibility()
                     }
                 }
@@ -95,16 +91,13 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
         }
     }
 
-    override fun onInterrupt() {
-        ScrollController.stop()
-    }
+    override fun onInterrupt() = ScrollController.stop()
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
         when (event.keyCode) {
             KeyEvent.KEYCODE_VOLUME_UP   -> volUpHeld   = event.action == KeyEvent.ACTION_DOWN
             KeyEvent.KEYCODE_VOLUME_DOWN -> volDownHeld = event.action == KeyEvent.ACTION_DOWN
         }
-        // Both volume keys held simultaneously → emergency stop
         if (volUpHeld && volDownHeld && ScrollController.state.value != ScrollState.IDLE) {
             ScrollController.stop()
             return true
@@ -115,15 +108,19 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: Intent): Boolean {
         ScrollController.stop()
         ScrollController.service = null
+        instance = null
         overlayManager?.destroy()
         overlayManager = null
         scope.cancel()
+        try { unregisterReceiver(systemReceiver) } catch (_: Exception) {}
+        notificationManager().cancel(NOTIF_ID)
         return super.onUnbind(intent)
     }
 
-    // ── overlay visibility logic ──────────────────────────────────────────────
+    // ── overlay visibility ────────────────────────────────────────────────────
     private fun updateOverlayVisibility() {
-        val shouldShow = currentPkg.isNotEmpty() && currentSettings.enabledApps.contains(currentPkg)
+        val shouldShow = currentPkg.isNotEmpty() &&
+                         currentSettings.enabledApps.contains(currentPkg)
         when {
             shouldShow && !overlayVisible  -> { overlayManager?.show(); overlayVisible = true  }
             !shouldShow && overlayVisible  -> { overlayManager?.hide(); overlayVisible = false }
@@ -131,35 +128,27 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
     }
 
     private fun isKeyboardVisible(): Boolean {
-        val wm = getSystemService(Context.WINDOW_SERVICE)
-                as android.view.WindowManager
-        val windows = windows ?: return false
-        return windows.any { it.type == android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD }
+        return windows?.any { it.type == android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD } == true
     }
 
     // ── persistent notification ───────────────────────────────────────────────
     private fun createNotificationChannel() {
-        val ch = NotificationChannel(
-            CHANNEL_ID, "ScrollPilot Controls",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply { setShowBadge(false) }
+        val ch = NotificationChannel(CHANNEL_ID, "ScrollPilot Controls",
+            NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) }
         notificationManager().createNotificationChannel(ch)
     }
 
     private fun showPersistentNotification() {
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
 
-        val stopIntent = PendingIntent.getBroadcast(this, 0,
-            Intent(ACTION_STOP), flags)
-        val hideIntent = PendingIntent.getBroadcast(this, 1,
-            Intent(ACTION_HIDE), flags)
-        val exitIntent = PendingIntent.getBroadcast(this, 2,
-            Intent(ACTION_EXIT), flags)
+        val stopIntent = PendingIntent.getBroadcast(this, 0, Intent(ACTION_STOP), flags)
+        val hideIntent = PendingIntent.getBroadcast(this, 1, Intent(ACTION_HIDE), flags)
+        val exitIntent = PendingIntent.getBroadcast(this, 2, Intent(ACTION_EXIT), flags)
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("ScrollPilot is running")
-            .setContentText("Tap an action to control scrolling")
+            .setContentText("Long-press the dot on the overlay, or use actions below")
             .setOngoing(true)
             .setSilent(true)
             .addAction(0, "STOP SCROLL", stopIntent)
@@ -167,7 +156,7 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
             .addAction(0, "EXIT", exitIntent)
             .build()
 
-        notificationManager().notify(NOTIF_ID, notification)
+        try { notificationManager().notify(NOTIF_ID, notification) } catch (_: Exception) {}
     }
 
     private fun notificationManager() =
@@ -197,14 +186,22 @@ class ScrollPilotAccessibilityService : AccessibilityService() {
             addAction(ACTION_HIDE)
             addAction(ACTION_EXIT)
         }
-        registerReceiver(systemReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        try {
+            registerReceiver(systemReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } catch (_: Exception) {
+            // API < 33 fallback
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(systemReceiver, filter)
+        }
     }
 
     companion object {
-        private const val CHANNEL_ID = "scrollpilot_controls"
-        private const val NOTIF_ID   = 9001
-        const val ACTION_STOP        = "com.scrollpilot.STOP"
-        const val ACTION_HIDE        = "com.scrollpilot.HIDE"
-        const val ACTION_EXIT        = "com.scrollpilot.EXIT"
+        @Volatile var instance: ScrollPilotAccessibilityService? = null
+
+        const val CHANNEL_ID  = "scrollpilot_controls"
+        const val NOTIF_ID    = 9001
+        const val ACTION_STOP = "com.scrollpilot.STOP"
+        const val ACTION_HIDE = "com.scrollpilot.HIDE"
+        const val ACTION_EXIT = "com.scrollpilot.EXIT"
     }
 }

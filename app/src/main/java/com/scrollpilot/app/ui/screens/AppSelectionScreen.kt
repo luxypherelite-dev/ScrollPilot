@@ -1,6 +1,5 @@
 package com.scrollpilot.app.ui.screens
 
-import android.graphics.drawable.Drawable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,7 +32,7 @@ fun AppSelectionScreen(padding: PaddingValues = PaddingValues(0.dp)) {
 
     LaunchedEffect(Unit) {
         val settings = SettingsDataStore.globalSettings(ctx).first()
-        selectedPkgs = settings.selectedApps
+        selectedPkgs = settings.enabledApps   // ← updated field name
         apps         = withContext(Dispatchers.IO) { AppListHelper.getInstalledUserApps(ctx) }
         loading      = false
     }
@@ -43,18 +42,13 @@ fun AppSelectionScreen(padding: PaddingValues = PaddingValues(0.dp)) {
         else apps.filter { it.label.contains(searchQuery, ignoreCase = true) }
     }
 
-    Column(
-        modifier = Modifier
-            .padding(padding)
-            .fillMaxSize()
-    ) {
-        // Header
+    Column(modifier = Modifier.padding(padding).fillMaxSize()) {
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             Text("App Selection", style = MaterialTheme.typography.headlineSmall)
             Text(
                 "${selectedPkgs.size} app${if (selectedPkgs.size == 1) "" else "s"} selected",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary
+                color = MaterialTheme.colorScheme.primary,
             )
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
@@ -62,14 +56,12 @@ fun AppSelectionScreen(padding: PaddingValues = PaddingValues(0.dp)) {
                 onValueChange = { searchQuery = it },
                 placeholder   = { Text("Search apps…") },
                 singleLine    = true,
-                modifier      = Modifier.fillMaxWidth()
+                modifier      = Modifier.fillMaxWidth(),
             )
         }
 
         if (loading) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         } else {
             LazyColumn(contentPadding = PaddingValues(bottom = 16.dp)) {
                 items(filtered, key = { it.packageName }) { app ->
@@ -79,10 +71,8 @@ fun AppSelectionScreen(padding: PaddingValues = PaddingValues(0.dp)) {
                         onToggle = { checked ->
                             selectedPkgs = if (checked) selectedPkgs + app.packageName
                                           else           selectedPkgs - app.packageName
-                            scope.launch {
-                                SettingsDataStore.setSelectedApps(ctx, selectedPkgs)
-                            }
-                        }
+                            scope.launch { SettingsDataStore.setSelectedApps(ctx, selectedPkgs) }
+                        },
                     )
                     HorizontalDivider(modifier = Modifier.padding(start = 72.dp))
                 }
@@ -92,32 +82,23 @@ fun AppSelectionScreen(padding: PaddingValues = PaddingValues(0.dp)) {
 }
 
 @Composable
-private fun AppRow(
-    app: AppInfo,
-    selected: Boolean,
-    onToggle: (Boolean) -> Unit,
-) {
+private fun AppRow(app: AppInfo, selected: Boolean, onToggle: (Boolean) -> Unit) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        modifier              = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment     = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         val bmp = remember(app.packageName) {
             runCatching { app.icon.toBitmap(48, 48).asImageBitmap() }.getOrNull()
         }
-        if (bmp != null) {
-            Image(bitmap = bmp, contentDescription = null, modifier = Modifier.size(40.dp))
-        } else {
-            Box(Modifier.size(40.dp))
-        }
+        if (bmp != null) Image(bitmap = bmp, contentDescription = null, modifier = Modifier.size(40.dp))
+        else Box(Modifier.size(40.dp))
 
         Column(modifier = Modifier.weight(1f)) {
-            Text(app.label, style = MaterialTheme.typography.bodyMedium)
-            Text(app.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            Text(app.label,       style = MaterialTheme.typography.bodyMedium)
+            Text(app.packageName, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline)
         }
-
         Switch(checked = selected, onCheckedChange = onToggle)
     }
 }
