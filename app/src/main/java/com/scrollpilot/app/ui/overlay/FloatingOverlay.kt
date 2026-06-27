@@ -1,191 +1,303 @@
 package com.scrollpilot.app.ui.overlay
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.scrollpilot.app.data.GlobalSettings
-import com.scrollpilot.app.data.ScrollDirection
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.*
+import com.scrollpilot.app.data.*
 import com.scrollpilot.app.service.ScrollController
+import com.scrollpilot.app.service.ScrollState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+// ── Colors ────────────────────────────────────────────────────────────────────
+private val ColorUp    = Color(0xFF4CAF50)
+private val ColorDown  = Color(0xFF2196F3)
+private val ColorIdle  = Color(0xFF555555)
+private val BgColor    = Color(0xEE1A1A2E)
+private val SurfaceCol = Color(0xFF16213E)
+
+// ── Top-level composable ──────────────────────────────────────────────────────
+@Composable
+fun FloatingOverlay(settings: GlobalSettings) {
+    Box(Modifier.scale(settings.effectiveScale)) {
+        OverlayCard(settings = settings)
+    }
+}
 
 @Composable
-fun FloatingOverlay(
-    settings: GlobalSettings,
-    onDragDelta: (Float, Float) -> Unit,
-) {
-    val scrollState by ScrollController.state.collectAsState()
+private fun OverlayCard(settings: GlobalSettings) {
+    val ctx   = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    Surface(
-        shape     = RoundedCornerShape(20.dp),
-        color     = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-        shadowElevation = 12.dp,
-        modifier  = Modifier.width(if (settings.keepCompact) 68.dp else 80.dp)
+    val state by ScrollController.state.collectAsState()
+    val speed by ScrollController.speed.collectAsState()
+
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val pulse by infiniteTransition.animateFloat(
+        initialValue   = 0.88f,
+        targetValue    = 1f,
+        animationSpec  = infiniteRepeatable(tween(650, easing = EaseInOutSine), RepeatMode.Reverse),
+        label          = "pulse",
+    )
+    val activeScale = if (state != ScrollState.IDLE) pulse else 1f
+
+    Card(
+        modifier  = Modifier.width(210.dp),
+        shape     = RoundedCornerShape(16.dp),
+        colors    = CardDefaults.cardColors(containerColor = BgColor),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
     ) {
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp)
+            modifier              = Modifier.padding(10.dp),
+            horizontalAlignment   = Alignment.CenterHorizontally,
+            verticalArrangement   = Arrangement.spacedBy(6.dp),
         ) {
-
-            // ── Up button ─────────────────────────────────────────────────
-            if (settings.showUpButton) {
-                val upActive = scrollState.direction == ScrollDirection.UP
-                FilledIconButton(
-                    onClick  = { ScrollController.toggleDirection(ScrollDirection.UP) },
-                    modifier = Modifier.size(56.dp),
-                    colors   = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (upActive)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Icon(
-                        Icons.Default.KeyboardArrowUp,
-                        contentDescription = "Scroll up",
-                        modifier = Modifier.size(32.dp),
-                        tint = if (upActive) MaterialTheme.colorScheme.onPrimary
-                               else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            // ── Header ───────────────────────────────────────────
+            Row(
+                modifier              = Modifier.fillMaxWidth(),
+                verticalAlignment     = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    "ScrollPilot",
+                    style    = MaterialTheme.typography.labelMedium,
+                    color    = Color.White.copy(alpha = 0.5f),
+                    fontSize = 11.sp,
+                )
+                // Long-press the dot = emergency stop
+                val dotColor by animateColorAsState(
+                    targetValue = when (state) {
+                        ScrollState.IDLE           -> ColorIdle
+                        ScrollState.SCROLLING_UP   -> ColorUp
+                        ScrollState.SCROLLING_DOWN -> ColorDown
+                    }, label = "dot",
+                )
+                Box(
+                    Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(dotColor)
+                        .pointerInput(Unit) {
+                            detectTapGestures(onLongPress = { ScrollController.stop() })
+                        },
+                )
+                Text(
+                    when (state) {
+                        ScrollState.IDLE           -> "IDLE"
+                        ScrollState.SCROLLING_UP   -> "↑ UP"
+                        ScrollState.SCROLLING_DOWN -> "↓ DOWN"
+                    },
+                    fontSize   = 10.sp,
+                    color      = when (state) {
+                        ScrollState.IDLE           -> Color.Gray
+                        ScrollState.SCROLLING_UP   -> ColorUp
+                        ScrollState.SCROLLING_DOWN -> ColorDown
+                    },
+                    fontWeight = FontWeight.Bold,
+                )
             }
 
-            // ── Speed slider + indicator ───────────────────────────────────
-            if (settings.showSpeedSlider) {
-                val sliderValue = (scrollState.targetSpeed / settings.maxSpeed).coerceIn(0f, 1f)
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    // Vertical slider (rotated via custom drag)
-                    VerticalSpeedSlider(
-                        value    = sliderValue,
-                        onChange = { v -> ScrollController.setTargetSpeed(v * settings.maxSpeed) },
-                        modifier = Modifier.height(100.dp)
-                    )
+            // ── UP direction button ───────────────────────────────
+            DirectionButton(
+                label   = "▲  UP",
+                active  = state == ScrollState.SCROLLING_UP,
+                color   = ColorUp,
+                pulse   = activeScale,
+                onClick = { ScrollController.pressUp() },
+            )
 
-                    if (settings.showSpeedAnimation) {
-                        SpeedIndicator(currentSpeed = scrollState.currentSpeed, maxSpeed = settings.maxSpeed)
-                    }
-                }
+            // ── Speed controls ────────────────────────────────────
+            SpeedRow(speed = speed, scope = scope)
+
+            // ── DOWN direction button ─────────────────────────────
+            DirectionButton(
+                label   = "▼  DOWN",
+                active  = state == ScrollState.SCROLLING_DOWN,
+                color   = ColorDown,
+                pulse   = activeScale,
+                onClick = { ScrollController.pressDown() },
+            )
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            // ── Engine + Size pickers ─────────────────────────────
+            Row(
+                modifier              = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment     = Alignment.CenterVertically,
+            ) {
+                // Cycle scroll engine
+                CycleButton(
+                    label   = settings.scrollEngine.name.lowercase().replaceFirstChar { it.uppercase() },
+                    prefix  = "⚙",
+                    onClick = {
+                        val next = ScrollEngine.entries.let { it[(it.indexOf(settings.scrollEngine) + 1) % it.size] }
+                        scope.launch { SettingsDataStore.setScrollEngine(ctx, next) }
+                    },
+                )
+                // Cycle overlay size
+                val sizeOptions = listOf(OverlaySize.COMPACT, OverlaySize.NORMAL, OverlaySize.LARGE)
+                CycleButton(
+                    label   = settings.overlaySize.label,
+                    prefix  = "⊞",
+                    onClick = {
+                        val cur = sizeOptions.indexOf(settings.overlaySize).coerceAtLeast(0)
+                        val next = sizeOptions[(cur + 1) % sizeOptions.size]
+                        scope.launch { SettingsDataStore.setOverlaySize(ctx, next) }
+                    },
+                )
             }
+        }
+    }
+}
 
-            // ── Down button ───────────────────────────────────────────────
-            if (settings.showDownButton) {
-                val downActive = scrollState.direction == ScrollDirection.DOWN
-                FilledIconButton(
-                    onClick  = { ScrollController.toggleDirection(ScrollDirection.DOWN) },
-                    modifier = Modifier.size(56.dp),
-                    colors   = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (downActive)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.surfaceVariant
+// ── Direction button (toggles on/off, shows ■ STOP when active) ───────────────
+@Composable
+private fun DirectionButton(
+    label:   String,
+    active:  Boolean,
+    color:   Color,
+    pulse:   Float,
+    onClick: () -> Unit,
+) {
+    val bgColor by animateColorAsState(
+        if (active) color.copy(alpha = 0.25f) else SurfaceCol,
+        tween(200), label = "bg",
+    )
+    val borderColor by animateColorAsState(
+        if (active) color else Color.White.copy(alpha = 0.12f),
+        tween(200), label = "border",
+    )
+    Button(
+        onClick        = onClick,
+        modifier       = Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .scale(if (active) pulse else 1f),
+        shape          = RoundedCornerShape(10.dp),
+        colors         = ButtonDefaults.buttonColors(
+            containerColor = bgColor,
+            contentColor   = if (active) color else Color.White.copy(alpha = 0.7f),
+        ),
+        border         = androidx.compose.foundation.BorderStroke(
+            if (active) 1.5.dp else 1.dp, borderColor,
+        ),
+        elevation      = ButtonDefaults.buttonElevation(0.dp),
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        Text(
+            // Replace arrow with ■ when active (press again to stop)
+            text       = if (active) label.replace("▲", "■").replace("▼", "■") else label,
+            fontSize   = 13.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+            letterSpacing = 0.5.sp,
+        )
+    }
+}
+
+// ── Speed row: slider + hold-repeat ± buttons ─────────────────────────────────
+@Composable
+private fun SpeedRow(speed: Float, scope: kotlinx.coroutines.CoroutineScope) {
+    val pct = ((speed - ScrollController.MIN_SPEED) /
+               (ScrollController.MAX_SPEED - ScrollController.MIN_SPEED)).coerceIn(0f, 1f)
+    val label = if (speed >= 1000f) "${"%.1f".format(speed / 1000f)}K" else "${speed.toInt()}"
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text("$label px/s", fontSize = 11.sp, color = Color.White.copy(alpha = 0.5f))
+
+        Row(
+            modifier              = Modifier.fillMaxWidth(),
+            verticalAlignment     = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            HoldRepeatButton(Modifier.size(32.dp), scope, { ScrollController.speedDown() }) {
+                SpeedBtn("−")
+            }
+            Slider(
+                value         = pct,
+                onValueChange = { v ->
+                    ScrollController.setSpeed(
+                        ScrollController.MIN_SPEED +
+                        v * (ScrollController.MAX_SPEED - ScrollController.MIN_SPEED)
                     )
-                ) {
-                    Icon(
-                        Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Scroll down",
-                        modifier = Modifier.size(32.dp),
-                        tint = if (downActive) MaterialTheme.colorScheme.onPrimary
-                               else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                },
+                modifier = Modifier.weight(1f).height(24.dp),
+                colors   = SliderDefaults.colors(
+                    thumbColor         = Color.White,
+                    activeTrackColor   = Color(0xFF7C83FD),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.15f),
+                ),
+            )
+            HoldRepeatButton(Modifier.size(32.dp), scope, { ScrollController.speedUp() }) {
+                SpeedBtn("+")
             }
         }
     }
 }
 
 @Composable
-private fun VerticalSpeedSlider(
-    value: Float,
-    onChange: (Float) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var dragTotal by remember { mutableFloatStateOf(0f) }
-    var baseValue by remember { mutableFloatStateOf(value) }
-
+private fun SpeedBtn(symbol: String) {
     Box(
-        modifier = modifier
-            .width(28.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .pointerInput(Unit) {
-                detectVerticalDragGestures(
-                    onDragStart = { baseValue = value; dragTotal = 0f },
-                    onVerticalDrag = { _, dy ->
-                        dragTotal += dy
-                        // drag up (negative dy) → increase speed
-                        val newVal = (baseValue - dragTotal / size.height).coerceIn(0f, 1f)
-                        onChange(newVal)
-                    }
-                )
-            },
-        contentAlignment = Alignment.BottomCenter
+        Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)).background(SurfaceCol),
+        contentAlignment = Alignment.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(value.coerceIn(0.02f, 1f))
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
-        )
+        Text(symbol, fontSize = 16.sp, color = Color.White, fontWeight = FontWeight.Light)
     }
 }
 
+// ── Hold-to-repeat wrapper ────────────────────────────────────────────────────
 @Composable
-private fun SpeedIndicator(currentSpeed: Float, maxSpeed: Float) {
-    val ratio = (currentSpeed / maxSpeed).coerceIn(0f, 1f)
-    val color = when {
-        ratio < 0.33f -> MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-        ratio < 0.66f -> MaterialTheme.colorScheme.primary
-        else          -> Color(0xFFFF6D00)
-    }
+private fun HoldRepeatButton(
+    modifier: Modifier,
+    scope:    kotlinx.coroutines.CoroutineScope,
+    onClick:  () -> Unit,
+    content:  @Composable () -> Unit,
+) {
+    Box(
+        modifier         = modifier.pointerInput(Unit) {
+            detectTapGestures(onPress = {
+                onClick()
+                val job = scope.launch {
+                    delay(350L)
+                    while (true) { onClick(); delay(100L) }
+                }
+                tryAwaitRelease()
+                job.cancel()
+            })
+        },
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
 
-    // Pulsing dot when scrolling
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val alpha by infiniteTransition.animateFloat(
-        initialValue = 0.4f,
-        targetValue  = if (currentSpeed > 0f) 1f else 0.4f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "alpha"
-    )
-
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-        modifier = Modifier.fillMaxWidth()
+// ── Small cycle-through button ────────────────────────────────────────────────
+@Composable
+private fun CycleButton(label: String, prefix: String, onClick: () -> Unit) {
+    TextButton(
+        onClick        = onClick,
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+        colors         = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.45f)),
     ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(color.copy(alpha = alpha))
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text  = "${currentSpeed.toInt()}",
-            fontSize = 9.sp,
-            color    = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1
-        )
+        Text("$prefix $label", fontSize = 10.sp)
     }
 }

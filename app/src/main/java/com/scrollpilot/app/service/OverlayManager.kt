@@ -4,7 +4,7 @@ import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Bundle
 import android.view.*
-import androidx.compose.runtime.Recomposer
+import androidx.compose.runtime.*
 import androidx.compose.ui.platform.AndroidUiDispatcher
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.compositionContext
@@ -26,7 +26,10 @@ class OverlayManager(private val ctx: Context) {
     private var composeView: ComposeView? = null
     private var params: WindowManager.LayoutParams? = null
     private var isShowing = false
-    private var currentSettings = GlobalSettings()
+
+    // Reactive settings state — changes trigger Compose recomposition automatically
+    private val settingsState = mutableStateOf(GlobalSettings())
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val lifecycleOwner = OverlayLifecycleOwner()
 
@@ -36,8 +39,7 @@ class OverlayManager(private val ctx: Context) {
     }
 
     fun updateSettings(settings: GlobalSettings) {
-        currentSettings = settings
-        composeView?.invalidate()
+        settingsState.value = settings
     }
 
     fun show() {
@@ -52,9 +54,7 @@ class OverlayManager(private val ctx: Context) {
 
     fun hide() {
         if (!isShowing) return
-        try {
-            wm.removeView(composeView)
-        } catch (_: Exception) {}
+        try { wm.removeView(composeView) } catch (_: Exception) {}
         composeView = null
         isShowing   = false
         lifecycleOwner.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
@@ -69,8 +69,8 @@ class OverlayManager(private val ctx: Context) {
 
     private fun buildView() {
         val metrics = ctx.resources.displayMetrics
-        val savedX  = currentSettings.overlayX
-        val savedY  = currentSettings.overlayY
+        val savedX  = settingsState.value.overlayX
+        val savedY  = settingsState.value.overlayY
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -82,31 +82,31 @@ class OverlayManager(private val ctx: Context) {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = if (savedX >= 0) savedX else (metrics.widthPixels - 300)
-            y = if (savedY >= 0) savedY else (metrics.heightPixels - 520)
+            x = if (savedX >= 0) savedX else (metrics.widthPixels - 250)
+            y = if (savedY >= 0) savedY else (metrics.heightPixels / 2)
         }
         params = lp
 
         val view = ComposeView(ctx).apply {
             setContent {
                 ScrollPilotTheme {
-                    FloatingOverlay(
-                        settings    = currentSettings,
-                        onDragDelta = { dx, dy -> moveOverlay(dx, dy) },
-                    )
+                    // settingsState.value is a Compose state — recompose auto-triggers on change
+                    FloatingOverlay(settings = settingsState.value)
                 }
             }
         }
 
-        // Attach lifecycle so Compose works inside WindowManager
+        // Wire up lifecycle so Compose works inside WindowManager
         view.setViewTreeLifecycleOwner(lifecycleOwner)
         view.setViewTreeSavedStateRegistryOwner(lifecycleOwner)
 
         val recomposer = Recomposer(AndroidUiDispatcher.CurrentThread)
         view.compositionContext = recomposer
-        scope.launch(AndroidUiDispatcher.CurrentThread) { recomposer.runRecomposeAndApplyChanges() }
+        scope.launch(AndroidUiDispatcher.CurrentThread) {
+            recomposer.runRecomposeAndApplyChanges()
+        }
 
-        // Drag handler
+        // Drag handler — translate the window when finger drags
         var startRawX = 0f; var startRawY = 0f
         var startLpX  = 0;  var startLpY  = 0
         var isDragging = false
@@ -127,7 +127,7 @@ class OverlayManager(private val ctx: Context) {
                         lp.x = startLpX + dx
                         lp.y = startLpY + dy
                         try { wm.updateViewLayout(view, lp) } catch (_: Exception) {}
-                        if (currentSettings.rememberLastPosition) {
+                        if (settingsState.value.rememberLastPosition) {
                             scope.launch { SettingsDataStore.setOverlayPosition(ctx, lp.x, lp.y) }
                         }
                     }
@@ -138,12 +138,6 @@ class OverlayManager(private val ctx: Context) {
         }
 
         composeView = view
-    }
-
-    private fun moveOverlay(dx: Float, dy: Float) {
-        val lp = params ?: return
-        lp.x += dx.toInt(); lp.y += dy.toInt()
-        try { wm.updateViewLayout(composeView, lp) } catch (_: Exception) {}
     }
 }
 

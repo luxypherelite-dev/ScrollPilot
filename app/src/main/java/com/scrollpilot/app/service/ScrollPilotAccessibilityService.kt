@@ -1,166 +1,210 @@
 package com.scrollpilot.app.service
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.GestureDescription
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
-import android.graphics.Path
-import android.os.SystemClock
+import android.content.IntentFilter
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityWindowInfo
-import com.scrollpilot.app.data.AccelerationMode
-import com.scrollpilot.app.data.ScrollDirection
+import androidx.core.app.NotificationCompat
+import com.scrollpilot.app.R
+import com.scrollpilot.app.data.GlobalSettings
 import com.scrollpilot.app.data.SettingsDataStore
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collectLatest
 
 class ScrollPilotAccessibilityService : AccessibilityService() {
 
-    companion object {
-        var instance: ScrollPilotAccessibilityService? = null
-    }
-
-    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var overlayManager: OverlayManager? = null
-    private var scrollJob: Job? = null
-    private var currentForegroundPkg = ""
-    private var selectedApps: Set<String> = emptySet()
-    private var keyboardVisible = false
-    private var hideWithKeyboard = true
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var currentSettings = GlobalSettings()
+    private var currentPkg = ""
+    private var overlayVisible = false
 
-    private val screenW get() = resources.displayMetrics.widthPixels
-    private val screenH get() = resources.displayMetrics.heightPixels
+    // Volume-key emergency combo tracking
+    private var volUpHeld   = false
+    private var volDownHeld = false
 
+    // ── lifecycle ─────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
         super.onServiceConnected()
-        instance = this
+        ScrollController.service = this
         overlayManager = OverlayManager(this)
 
-        serviceScope.launch {
-            SettingsDataStore.globalSettings(applicationContext).collect { settings ->
-                selectedApps     = settings.selectedApps
-                hideWithKeyboard = settings.hideWithKeyboard
-                ScrollController.applySettings(
-                    targetSpeed = settings.defaultSpeed,
-                    maxSpeed    = settings.maxSpeed,
-                    mode        = settings.accelerationMode,
-                    customAccel = settings.customAccel,
-                    customDecel = settings.customDecel,
-                    infinite    = settings.infiniteAcceleration,
-                )
-                overlayManager?.updateSettings(settings)
-                updateOverlayVisibility()
-            }
+        // Request key events so we can intercept volume keys
+        serviceInfo = serviceInfo?.also { info ->
+            info.flags = info.flags or
+                    AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
         }
 
-        startScrollLoop()
+        createNotificationChannel()
+        showPersistentNotification()
+        registerSystemReceivers()
+
+        scope.launch {
+            SettingsDataStore.observe(this@ScrollPilotAccessibilityService)
+                .collectLatest { settings ->
+                    currentSettings = settings
+                    ScrollController.settings = settings
+                    overlayManager?.updateSettings(settings)
+                    updateOverlayVisibility()
+                }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         when (event.eventType) {
+            // User touched the screen → immediately stop scrolling
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
+                if (ScrollController.state.value != ScrollState.IDLE) {
+                    ScrollController.pause()
+                }
+            }
+
+            // App changed → update overlay visibility
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val pkg = event.packageName?.toString() ?: return
-                if (pkg != currentForegroundPkg && pkg != packageName) {
-                    currentForegroundPkg = pkg
-                    ScrollController.pause()
+                if (pkg != currentPkg) {
+                    currentPkg = pkg
+                    // Also stop scrolling when switching apps
+                    ScrollController.stop()
                     updateOverlayVisibility()
                 }
             }
+
+            // Input method (keyboard) appeared/disappeared
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> {
-                detectKeyboard()
+                if (currentSettings.hideOnKeyboard) {
+                    val keyboardOpen = isKeyboardVisible()
+                    if (keyboardOpen && overlayVisible) {
+                        ScrollController.stop()
+                        overlayManager?.hide()
+                        overlayVisible = false
+                    } else if (!keyboardOpen) {
+                        updateOverlayVisibility()
+                    }
+                }
             }
         }
-    }
-
-    private fun detectKeyboard() {
-        val hasKeyboard = windows?.any { w ->
-            w.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD
-        } ?: false
-
-        if (hasKeyboard != keyboardVisible) {
-            keyboardVisible = hasKeyboard
-            updateOverlayVisibility()
-        }
-    }
-
-    private fun updateOverlayVisibility() {
-        val isSelectedApp = currentForegroundPkg in selectedApps
-        val shouldHide = keyboardVisible && hideWithKeyboard
-        val shouldShow = isSelectedApp && !shouldHide
-        if (shouldShow) overlayManager?.show() else overlayManager?.hide()
-    }
-
-    private fun startScrollLoop() {
-        scrollJob?.cancel()
-        scrollJob = serviceScope.launch {
-            var lastTick = SystemClock.elapsedRealtime()
-            while (isActive) {
-                val now   = SystemClock.elapsedRealtime()
-                val delta = now - lastTick
-                lastTick  = now
-
-                val speed = ScrollController.tick(delta)
-                val state = ScrollController.state.value
-
-                if (state.direction != ScrollDirection.PAUSED && speed > 0f) {
-                    val distance = (speed * delta / 1000f).coerceIn(20f, 800f)
-                    performScroll(state.direction, distance.toInt())
-                }
-
-                val sleepMs = when {
-                    speed < 200  -> 80L
-                    speed < 1000 -> 50L
-                    else         -> 30L
-                }
-                delay(sleepMs)
-            }
-        }
-    }
-
-    fun performScroll(direction: ScrollDirection, distancePx: Int) {
-        val cx = screenW / 2f
-        val halfDist = (distancePx / 2f).coerceAtLeast(10f)
-        val midY = screenH / 2f
-
-        val path = Path().apply {
-            when (direction) {
-                ScrollDirection.DOWN -> {
-                    // Finger swipes UP → content scrolls down (reads more)
-                    moveTo(cx, midY + halfDist)
-                    lineTo(cx, midY - halfDist)
-                }
-                ScrollDirection.UP -> {
-                    // Finger swipes DOWN → content scrolls up (goes back)
-                    moveTo(cx, midY - halfDist)
-                    lineTo(cx, midY + halfDist)
-                }
-                ScrollDirection.PAUSED -> return
-            }
-        }
-
-        val gestureDuration = (distancePx / 10L).coerceIn(30L, 150L)
-        val stroke = GestureDescription.StrokeDescription(path, 0L, gestureDuration)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        dispatchGesture(gesture, null, null)
     }
 
     override fun onInterrupt() {
-        ScrollController.pause()
-        overlayManager?.hide()
+        ScrollController.stop()
     }
 
-    override fun onUnbind(intent: Intent?): Boolean {
-        instance = null
-        ScrollController.pause()
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP   -> volUpHeld   = event.action == KeyEvent.ACTION_DOWN
+            KeyEvent.KEYCODE_VOLUME_DOWN -> volDownHeld = event.action == KeyEvent.ACTION_DOWN
+        }
+        // Both volume keys held simultaneously → emergency stop
+        if (volUpHeld && volDownHeld && ScrollController.state.value != ScrollState.IDLE) {
+            ScrollController.stop()
+            return true
+        }
+        return false
+    }
+
+    override fun onUnbind(intent: Intent): Boolean {
+        ScrollController.stop()
+        ScrollController.service = null
         overlayManager?.destroy()
-        serviceScope.cancel()
+        overlayManager = null
+        scope.cancel()
         return super.onUnbind(intent)
     }
 
-    override fun onDestroy() {
-        instance = null
-        ScrollController.pause()
-        overlayManager?.destroy()
-        serviceScope.cancel()
-        super.onDestroy()
+    // ── overlay visibility logic ──────────────────────────────────────────────
+    private fun updateOverlayVisibility() {
+        val shouldShow = currentPkg.isNotEmpty() && currentSettings.enabledApps.contains(currentPkg)
+        when {
+            shouldShow && !overlayVisible  -> { overlayManager?.show(); overlayVisible = true  }
+            !shouldShow && overlayVisible  -> { overlayManager?.hide(); overlayVisible = false }
+        }
+    }
+
+    private fun isKeyboardVisible(): Boolean {
+        val wm = getSystemService(Context.WINDOW_SERVICE)
+                as android.view.WindowManager
+        val windows = windows ?: return false
+        return windows.any { it.type == android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD }
+    }
+
+    // ── persistent notification ───────────────────────────────────────────────
+    private fun createNotificationChannel() {
+        val ch = NotificationChannel(
+            CHANNEL_ID, "ScrollPilot Controls",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply { setShowBadge(false) }
+        notificationManager().createNotificationChannel(ch)
+    }
+
+    private fun showPersistentNotification() {
+        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+
+        val stopIntent = PendingIntent.getBroadcast(this, 0,
+            Intent(ACTION_STOP), flags)
+        val hideIntent = PendingIntent.getBroadcast(this, 1,
+            Intent(ACTION_HIDE), flags)
+        val exitIntent = PendingIntent.getBroadcast(this, 2,
+            Intent(ACTION_EXIT), flags)
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("ScrollPilot is running")
+            .setContentText("Tap an action to control scrolling")
+            .setOngoing(true)
+            .setSilent(true)
+            .addAction(0, "STOP SCROLL", stopIntent)
+            .addAction(0, "HIDE OVERLAY", hideIntent)
+            .addAction(0, "EXIT", exitIntent)
+            .build()
+
+        notificationManager().notify(NOTIF_ID, notification)
+    }
+
+    private fun notificationManager() =
+        getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+
+    // ── system receivers ──────────────────────────────────────────────────────
+    private val systemReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> ScrollController.stop()
+                ACTION_STOP  -> ScrollController.stop()
+                ACTION_HIDE  -> { overlayManager?.hide(); overlayVisible = false }
+                ACTION_EXIT  -> {
+                    ScrollController.stop()
+                    overlayManager?.destroy()
+                    notificationManager().cancel(NOTIF_ID)
+                    disableSelf()
+                }
+            }
+        }
+    }
+
+    private fun registerSystemReceivers() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(ACTION_STOP)
+            addAction(ACTION_HIDE)
+            addAction(ACTION_EXIT)
+        }
+        registerReceiver(systemReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+    }
+
+    companion object {
+        private const val CHANNEL_ID = "scrollpilot_controls"
+        private const val NOTIF_ID   = 9001
+        const val ACTION_STOP        = "com.scrollpilot.STOP"
+        const val ACTION_HIDE        = "com.scrollpilot.HIDE"
+        const val ACTION_EXIT        = "com.scrollpilot.EXIT"
     }
 }
